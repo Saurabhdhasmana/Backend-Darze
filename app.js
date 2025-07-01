@@ -1,7 +1,7 @@
 require("dotenv").config();
 const express = require('express');
 const path = require('path');
-const connectToDb = require("./config/mongoose");
+const ConnectDB = require("./config/mongoose");
 const { upload, cpUpload } = require("./middleware/multer");
 const variantModel = require("./models/VariantModel");
 const Product = require("./models/productModel");
@@ -23,6 +23,9 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const app = express();
 const cors = require('cors');
+require("dotenv").config();
+
+const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -30,7 +33,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(cors());
 
-connectToDb();
+ConnectDB();
 
 app.get('/', (req, res) => {
   res.send('Hello World..');
@@ -489,7 +492,7 @@ app.get("/api/products", async (_req, res) => {
   res.json(
     await Product.find({
       status: true,
-      deletedAt: { $ne: null }
+      deletedAt: null
     }).select("name _id")
   );
 });
@@ -632,7 +635,9 @@ app.delete("/api/reviews/:id", requireAuth, async (req, res) => {
     res.status(400).json({ error: err.message });
   }
 });
-app.listen(3000, () => {
-  console.log('Server is running on port 3000');
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
 });
+
+
 
