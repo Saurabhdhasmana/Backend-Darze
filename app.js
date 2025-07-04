@@ -216,13 +216,12 @@ app.post('/api/product', cpUpload, async (req, res) => {
     }
     if (data.variants && Array.isArray(data.variants)) {
       data.variants = data.variants.map(variant => {
-        // If currentStock is not set, use openingStock
-        let currentStock = parseStockValue(variant.currentStock, undefined);
-        if (currentStock === undefined) {
-          currentStock = parseStockValue(variant.openingStock, 0);
-        }
+        // Set both openingStock and currentStock
+        const openingStock = parseStockValue(variant.openingStock, 0);
+        const currentStock = parseStockValue(variant.currentStock, openingStock);
         return {
           ...variant,
+          openingStock,
           currentStock,
           minimumStock: parseStockValue(variant.minimumStock, 5),
           reorderLevel: parseStockValue(variant.reorderLevel, 10)
@@ -303,25 +302,22 @@ app.put('/api/product/:id', cpUpload, async (req, res) => {
       return Number(val);
     }
     if (data.variants && Array.isArray(data.variants)) {
-      data.variants = data.variants.map(variant => {
-        // If currentStock is not set, use openingStock
-        let currentStock = parseStockValue(variant.currentStock, undefined);
-        if (currentStock === undefined) {
-          currentStock = parseStockValue(variant.openingStock, 0);
-        }
-        // Ensure min stock and reorder level are always present for edit form
-        let minimumStock = variant.minimumStock !== undefined && variant.minimumStock !== null && variant.minimumStock !== ''
+      data.variants = data.variants.map((variant, idx) => {
+        let newVariant = { ...variant };
+        // Update both openingStock and currentStock
+        newVariant.openingStock = variant.openingStock !== undefined && variant.openingStock !== null && variant.openingStock !== ''
+          ? parseStockValue(variant.openingStock, 0)
+          : 0;
+        newVariant.currentStock = variant.currentStock !== undefined && variant.currentStock !== null && variant.currentStock !== ''
+          ? parseStockValue(variant.currentStock, newVariant.openingStock)
+          : newVariant.openingStock;
+        newVariant.minimumStock = variant.minimumStock !== undefined && variant.minimumStock !== null && variant.minimumStock !== ''
           ? parseStockValue(variant.minimumStock, 5)
           : 5;
-        let reorderLevel = variant.reorderLevel !== undefined && variant.reorderLevel !== null && variant.reorderLevel !== ''
+        newVariant.reorderLevel = variant.reorderLevel !== undefined && variant.reorderLevel !== null && variant.reorderLevel !== ''
           ? parseStockValue(variant.reorderLevel, 10)
           : 10;
-        return {
-          ...variant,
-          currentStock,
-          minimumStock,
-          reorderLevel
-        };
+        return newVariant;
       });
     }
     const updated = await Product.findByIdAndUpdate(req.params.id, data, { new: true });
@@ -699,10 +695,6 @@ app.post('/api/stock/initialize', async (req, res) => {
       
       if (product.variants && product.variants.length > 0) {
         product.variants.forEach(variant => {
-          if (variant.currentStock === undefined) {
-            variant.currentStock = variant.openingStock || 0;
-            hasChanges = true;
-          }
           if (variant.minimumStock === undefined) {
             variant.minimumStock = 5;
             hasChanges = true;
@@ -742,17 +734,29 @@ app.get('/api/stock/summary', async (req, res) => {
       if (product.variants && product.variants.length > 0) {
         // For variant products
         product.variants.forEach(variant => {
+          // Use currentStock for calculations if available, otherwise use openingStock
+          const currentStock = variant.currentStock !== undefined ? variant.currentStock : 
+                              (variant.openingStock !== undefined ? variant.openingStock : 0);
+          const minimumStock = variant.minimumStock !== undefined ? variant.minimumStock : 5;
+          const reorderLevel = variant.reorderLevel !== undefined ? variant.reorderLevel : 10;
+          let stockStatus = 'In Stock';
+          if (currentStock === 0) {
+            stockStatus = 'Out of Stock';
+          } else if (currentStock <= minimumStock) {
+            stockStatus = 'Low Stock';
+          } else if (currentStock <= reorderLevel) {
+            stockStatus = 'Reorder Level';
+          }
           stockSummary.push({
             productId: product._id,
             productName: product.name,
             variantName: variant.variantName,
             sku: variant.sku,
-            currentStock: variant.openingStock || 0,
-            minimumStock: variant.minimumStock || 5,
-            reorderLevel: variant.reorderLevel || 10,
-            stockStatus: (variant.openingStock || 0) === 0 ? 'Out of Stock' :
-                        (variant.openingStock || 0) <= (variant.minimumStock || 5) ? 'Low Stock' : 
-                        (variant.openingStock || 0) <= (variant.reorderLevel || 10) ? 'Reorder Level' : 'In Stock',
+            openingStock: variant.openingStock !== undefined ? variant.openingStock : 0, // Original opening stock
+            currentStock: currentStock, // Current stock for calculations and updates
+            minimumStock,
+            reorderLevel,
+            stockStatus,
             category: product.category?.name || 'N/A',
             brand: product.brand?.name || 'N/A'
           });
@@ -764,7 +768,7 @@ app.get('/api/stock/summary', async (req, res) => {
           productName: product.name,
           variantName: 'Default',
           sku: product.sku,
-          currentStock: 0, // You can add a main stock field if needed
+          openingStock: 0, // You can add a main stock field if needed
           minimumStock: 5,
           reorderLevel: 10,
           stockStatus: 'No Stock Tracking',
@@ -797,9 +801,10 @@ app.put('/api/stock/update/:productId/:sku', async (req, res) => {
       return res.status(404).json({ error: 'Variant not found' });
     }
 
-    // Use openingStock for summary and update, as in /api/stock/summary
-    // If openingStock is undefined, treat as 0
-    const previousStock = variant.openingStock !== undefined ? variant.openingStock : 0;
+
+    // Use currentStock for all calculations and updates (preserve original openingStock)
+    const previousStock = variant.currentStock !== undefined ? variant.currentStock : 
+                         (variant.openingStock !== undefined ? variant.openingStock : 0);
     let newStock = previousStock;
 
     // Calculate new stock based on transaction type
@@ -822,8 +827,10 @@ app.put('/api/stock/update/:productId/:sku', async (req, res) => {
       return res.status(400).json({ error: 'Stock cannot be negative' });
     }
 
-    // Update both openingStock and currentStock for consistency
-    variant.openingStock = newStock;
+    // Update currentStock (preserve original openingStock)
+    if (!variant.currentStock && variant.currentStock !== 0) {
+      variant.currentStock = variant.openingStock || 0;
+    }
     variant.currentStock = newStock;
     await product.save();
 
@@ -961,8 +968,11 @@ app.put('/api/stock/transactions/:id', async (req, res) => {
       return res.status(400).json({ error: 'Stock cannot be negative' });
     }
 
-    // 5. Update variant stock
-    variant.openingStock = newStock;
+    // 5. Update variant stock (preserve original openingStock, track current stock separately)
+    // Keep the original openingStock unchanged and use currentStock for tracking
+    if (!variant.currentStock && variant.currentStock !== 0) {
+      variant.currentStock = variant.openingStock || 0;
+    }
     variant.currentStock = newStock;
     await product.save();
 
@@ -988,7 +998,8 @@ app.get('/api/stock/alerts', async (req, res) => {
     products.forEach(product => {
       if (product.variants && product.variants.length > 0) {
         product.variants.forEach(variant => {
-          const currentStock = variant.currentStock || 0;
+          const currentStock = variant.currentStock !== undefined ? variant.currentStock : 
+                              (variant.openingStock !== undefined ? variant.openingStock : 0);
           const minimumStock = variant.minimumStock || 5;
           const reorderLevel = variant.reorderLevel || 10;
           
@@ -1049,6 +1060,10 @@ app.post('/api/stock/bulk-update', upload.single('stockFile'), async (req, res) 
         }
         
         if (newStock >= 0) {
+          // Update currentStock (preserve original openingStock)
+          if (!variant.currentStock && variant.currentStock !== 0) {
+            variant.currentStock = variant.openingStock || 0;
+          }
           variant.currentStock = newStock;
           await product.save();
           
